@@ -92,12 +92,16 @@ class FaceDetector:
         )
 
         # Stage 1: Detection
-        if should_tile:
-            raw = self._detect_with_tiling(img_small)
-        else:
-            raw = self._model.detect(img_small)
+        # Always run a global pass on the full image. This ensures portraits,
+        # close-ups, and large foreground faces are always captured.
+        global_raw = self._model.detect(img_small)
 
-        raw = nms(raw, self.cfg.nms_iou_cross_tile)
+        if should_tile:
+            # Additionally run tiling to catch small or distant crowd faces
+            tile_raw = self._detect_with_tiling(img_small)
+            raw = nms(global_raw + tile_raw, self.cfg.nms_iou_cross_tile)
+        else:
+            raw = nms(global_raw, self.cfg.nms_iou_cross_tile)
 
         # Stage 2: Validator
         validated = apply_validator(raw, self.cfg)

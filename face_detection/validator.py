@@ -1,85 +1,135 @@
 """
-validator.py — Stage 2: Geometric & quality validator for face candidates.
+validator.py — 5-Layer precision filter (Stage 2 of the detection pipeline).
 
-The core design principle:
+Purpose:
   SCRFD (Stage 1) is tuned for high recall, which means it over-proposes.
-  Validator (Stage 2) is the precision gate.
-  It discards anything that physically cannot be a human face.
-  Total runtime for all 5 layers: < 1 ms per candidate.
+  This validator discards detections that are geometrically implausible as
+  human faces — arms, skin patches, hands, background textures, etc.
+
+All 5 layers run in < 1 ms regardless of how many candidates there are,
+because they operate on a short list of Python dicts (no neural network,
+no GPU, no memory allocation).
+
+Layers:
+  L1 — Minimum Size:        bbox too small → noise / artifact
+  L2 — Aspect Ratio:        bbox too wide or too narrow → arms, limbs
+  L3 — Landmark Geometry:   4 checks that only real faces can satisfy
+  L4 — Confidence Floor:    post-geometry confidence threshold (stricter)
+  L5 — Final NMS:           called externally in detector.py (not here)
+
+Landmark layout from SCRFD:
+  lm[0] = left_eye
+  lm[1] = right_eye
+  lm[2] = nose_tip
+  lm[3] = mouth_left_corner
+  lm[4] = mouth_right_corner
 """
 
-from typing import List, Dict, Any
-import numpy as np
+from typing import List
 from face_detection.config import DetectorConfig
-from face_detection.postprocess import nms
 
 
-def validate_face(face: Dict[str, Any], cfg: DetectorConfig) -> bool:
+def _validate_single(det: dict, cfg: DetectorConfig) -> bool:
     """
-    Apply structural validity checks to a single candidate detection.
-    Returns True if the candidate passes all checks, False otherwise.
+    Run all validator layers on a single detection dict.
+    Returns True if the detection passes all layers (keep it).
+    Returns False on the first layer that fails (discard it).
     """
-    x1, y1, x2, y2 = face["bbox"]
+    x1, y1, x2, y2 = det["bbox"]
     w = x2 - x1
     h = y2 - y1
+    conf = det["confidence"]
+    lm = det.get("landmarks")
 
-    # ── Layer 1: Minimum size ─────────────────────────────────────────────
+    # ── L1: Minimum Size ──────────────────────────────────────────────────
+    # Both width and height must exceed the minimum.
+    # Small detections are almost always noise, not distant faces
+    # (SCRFD tiling already handles small-but-real distant faces).
     if w < cfg.min_face_px or h < cfg.min_face_px:
         return False
 
-    # ── Layer 2: Aspect ratio ─────────────────────────────────────────────
-    aspect_ratio = h / (w + 1e-6)
-    if not (cfg.aspect_ratio_min <= aspect_ratio <= cfg.aspect_ratio_max):
+    # ── L2: Aspect Ratio ──────────────────────────────────────────────────
+    # Real face bounding boxes have aspect ratio (h/w) between ~0.5 and ~2.2.
+    # Arms / forearms → very tall and narrow (ratio 3–6) → rejected.
+    # Wide flat patches → ratio < 0.5 → rejected.
+    aspect = h / (w + 1e-6)
+    if not (cfg.aspect_ratio_min <= aspect <= cfg.aspect_ratio_max):
         return False
 
-    # ── Layer 3: 5-point landmark structural geometry ─────────────────────
-    landmarks = face.get("landmarks")
-    if landmarks is not None and len(landmarks) == 5:
-        left_eye    = landmarks[0]
-        right_eye   = landmarks[1]
-        nose_tip    = landmarks[2]
-        mouth_left  = landmarks[3]
-        mouth_right = landmarks[4]
+    # ── L3: Landmark Geometry ─────────────────────────────────────────────
+    # Only runs if landmarks are present (SCRFD always provides them).
+    # Four geometric invariants that every real face satisfies:
+    if lm is not None and len(lm) == 5:
+        left_eye    = lm[0]
+        right_eye   = lm[1]
+        nose_tip    = lm[2]
+        mouth_left  = lm[3]
+        mouth_right = lm[4]
 
-        # 3a: Eyes must be above the nose
-        if not (nose_tip[1] > min(left_eye[1], right_eye[1])):
-            return False
-
-        # 3b: Mouth must be below the nose
-        mouth_cy = (mouth_left[1] + mouth_right[1]) / 2.0
-        if not (mouth_cy > nose_tip[1]):
-            return False
-
-        # 3c: Eye separation must be a plausible fraction of bbox width
-        eye_sep   = abs(right_eye[0] - left_eye[0])
-        sep_ratio = eye_sep / (w + 1e-6)
-        if not (cfg.eye_sep_ratio_min <= sep_ratio <= cfg.eye_sep_ratio_max):
-            return False
-
-        # 3d: Mouth center must sit between the eyes laterally
-        margin      = eye_sep * 0.50
-        left_bound  = min(left_eye[0], right_eye[0]) - margin
-        right_bound = max(left_eye[0], right_eye[0]) + margin
+        eye_mid_y   = (left_eye[1] + right_eye[1]) / 2.0
+        mouth_mid_y = (mouth_left[1] + mouth_right[1]) / 2.0
+        eye_sep     = abs(right_eye[0] - left_eye[0])
         mouth_cx    = (mouth_left[0] + mouth_right[0]) / 2.0
-        if not (left_bound <= mouth_cx <= right_bound):
+        sep_ratio   = eye_sep / (w + 1e-6)
+
+        # Vertical tolerance to accommodate tilted heads, screaming/open mouths,
+        # or hands partially occluding the mouth/chin:
+        v_tol = max(2.0, eye_sep * 0.15)
+
+        # 3a: Eyes must be above the nose (y increases downward)
+        if not (eye_mid_y < nose_tip[1] + v_tol):
             return False
 
-    # ── Layer 4: Final confidence floor ───────────────────────────────────
-    if face.get("confidence", 1.0) < cfg.final_confidence:
+        # 3b: Nose must be above the mouth
+        if not (nose_tip[1] < mouth_mid_y + v_tol):
+            return False
+
+        mouth_sep   = abs(mouth_right[0] - mouth_left[0])
+        mouth_ratio = mouth_sep / (w + 1e-6)
+
+        # Check if the face is viewed in profile (yaw angle > 45-60°).
+        # In profile perspective, both eyes and mouth features are foreshortened
+        # horizontally along the line of sight.
+        is_profile = (sep_ratio < 0.20) and (mouth_ratio < 0.25)
+
+        if is_profile:
+            # Profile view: mouth and nose must lie within the bounding box horizontally
+            margin_x = w * 0.15
+            if not (x1 - margin_x <= mouth_cx <= x2 + margin_x):
+                return False
+        else:
+            # Frontal / semi-frontal view:
+            # 3c: Eye separation must be a plausible fraction of bbox width
+            if not (cfg.eye_sep_ratio_min <= sep_ratio <= cfg.eye_sep_ratio_max):
+                return False
+
+            # 3d: Mouth center must sit between the eyes laterally (with 50% margin for 3/4 poses)
+            margin      = eye_sep * 0.50
+            left_bound  = min(left_eye[0], right_eye[0]) - margin
+            right_bound = max(left_eye[0], right_eye[0]) + margin
+            if not (left_bound <= mouth_cx <= right_bound):
+                return False
+
+    # ── L4: Final Confidence Floor ────────────────────────────────────────
+    # Stricter than Stage 1's det_thresh (0.35).
+    # Detections that pass geometry but have borderline model confidence
+    # are still discarded here.
+    if conf < cfg.final_confidence:
         return False
 
+    # ── Passed all layers ─────────────────────────────────────────────────
     return True
 
 
-def validate_and_deduplicate(
-    faces: List[Dict[str, Any]],
-    cfg: DetectorConfig,
-) -> List[Dict[str, Any]]:
+def apply_validator(detections: List[dict], cfg: DetectorConfig) -> List[dict]:
     """
-    Run all candidate detections through the Stage 2 pipeline:
-      1. Filter through Layers 1–4 (validate_face)
-      2. Layer 5: Final NMS deduplication
+    Apply the full 5-layer validator to a list of detections.
+
+    Args:
+        detections: List of raw detection dicts from the model / tiler.
+        cfg:        DetectorConfig instance with all threshold values.
+
+    Returns:
+        Filtered list containing only detections that passed all layers.
     """
-    valid = [f for f in faces if validate_face(f, cfg)]
-    final = nms(valid, cfg.nms_iou_final)
-    return final
+    return [d for d in detections if _validate_single(d, cfg)]
