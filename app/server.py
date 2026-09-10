@@ -89,12 +89,27 @@ def detect():
     if img_bgr is None:
         return jsonify({"error": "Could not decode image. Supported formats: JPG, PNG, WEBP, BMP."}), 400
 
+    ih, iw = img_bgr.shape[:2]
+    print(f"[detect] Received image: {iw}x{ih} ({len(file_bytes)/1024:.1f} KB)")
+
     t0 = time.perf_counter()
     faces = detector.detect(img_bgr)
     t_detect = (time.perf_counter() - t0) * 1000
+    print(f"[detect] Detection finished in {t_detect:.1f} ms — found {len(faces)} faces")
 
+    # Render annotations
     annotated = draw_detections(img_bgr, faces)
-    ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+    # Downscale preview image for fast transmission over ngrok tunnel
+    max_preview_dim = 1600
+    ph, pw = annotated.shape[:2]
+    if max(ph, pw) > max_preview_dim:
+        scale = max_preview_dim / max(ph, pw)
+        annotated_preview = cv2.resize(annotated, (int(pw * scale), int(ph * scale)), interpolation=cv2.INTER_AREA)
+    else:
+        annotated_preview = annotated
+
+    ok, buf = cv2.imencode(".jpg", annotated_preview, [cv2.IMWRITE_JPEG_QUALITY, 82])
     if not ok:
         return jsonify({"error": "Failed to encode result image."}), 500
     annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8")

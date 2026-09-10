@@ -1,162 +1,267 @@
-'use strict';
+"use strict";
 
-// ── DOM Elements ─────────────────────────────────────────────────────────────
-const viewUpload  = document.getElementById('view-upload');
-const viewLoading = document.getElementById('view-loading');
-const viewResults = document.getElementById('view-results');
+// Dynamically refresh favicon to bust domain-level browser cache (e.g. ngrok tunnel domain)
+(function enforceFavicon() {
+  try {
+    const existing = document.querySelectorAll("link[rel*='icon']");
+    const ts = Date.now();
+    existing.forEach(el => {
+      if (el.href && !el.href.startsWith("data:")) {
+        el.href = el.href.split("?")[0] + "?t=" + ts;
+      }
+    });
+  } catch (_) {}
+})();
 
-const dropZone    = document.getElementById('drop-zone');
-const fileInput   = document.getElementById('file-input');
-const dzIdle      = document.getElementById('dz-idle');
-const dzOver      = document.getElementById('dz-over');
+// ── DOM refs ────────────────────────────────────────────────────────────────
+const viewUpload  = document.getElementById("view-upload");
+const viewLoading = document.getElementById("view-loading");
+const viewResults = document.getElementById("view-results");
 
-const resCount    = document.getElementById('res-count');
-const resTime     = document.getElementById('res-time');
-const resultImg   = document.getElementById('result-img');
-const faceList    = document.getElementById('face-list');
-const sidebarCount= document.getElementById('sidebar-count');
-const btnNew      = document.getElementById('btn-new');
+const dropZone    = document.getElementById("drop-zone");
+const fileInput   = document.getElementById("file-input");
+const dzIdle      = document.getElementById("dz-idle");
+const dzOver      = document.getElementById("dz-over");
 
-const errorToast  = document.getElementById('error-toast');
-const errorText   = document.getElementById('error-text');
-const errorDismiss= document.getElementById('error-dismiss');
+const loadingLabel = document.getElementById("loading-label");
 
-// ── View Switching ────────────────────────────────────────────────────────────
-function showView(view) {
-  [viewUpload, viewLoading, viewResults].forEach(v => v.classList.add('hidden'));
-  view.classList.remove('hidden');
-}
+const resCount     = document.getElementById("res-count");
+const resTime      = document.getElementById("res-time");
+const resultImg    = document.getElementById("result-img");
+const faceList     = document.getElementById("face-list");
+const sidebarCount = document.getElementById("sidebar-count");
 
-// ── Toast Error ───────────────────────────────────────────────────────────────
-function showError(msg) {
-  errorText.textContent = msg;
-  errorToast.classList.remove('hidden');
-  clearTimeout(showError._timer);
-  showError._timer = setTimeout(() => errorToast.classList.add('hidden'), 5000);
-}
-errorDismiss.addEventListener('click', () => errorToast.classList.add('hidden'));
+const btnNew       = document.getElementById("btn-new");
+const errorToast   = document.getElementById("error-toast");
+const errorText    = document.getElementById("error-text");
+const errorDismiss = document.getElementById("error-dismiss");
 
-// ── Drop Zone Events ──────────────────────────────────────────────────────────
-dropZone.addEventListener('click', () => fileInput.click());
-dropZone.addEventListener('keydown', e => {
-  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+
+// ── Drop zone ───────────────────────────────────────────────────────────────
+
+dropZone.addEventListener("click",   () => fileInput.click());
+dropZone.addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+});
+fileInput.addEventListener("change", () => {
+  if (fileInput.files?.[0]) go(fileInput.files[0]);
 });
 
-dropZone.addEventListener('dragover', e => {
+dropZone.addEventListener("dragover", e => {
   e.preventDefault();
-  dzIdle.classList.add('hidden');
-  dzOver.classList.remove('hidden');
-  dropZone.classList.add('drag-over');
+  dropZone.classList.add("drag-over");
+  dzIdle.classList.add("hidden");
+  dzOver.classList.remove("hidden");
 });
-
-['dragleave', 'dragend'].forEach(ev => {
-  dropZone.addEventListener(ev, () => {
-    dzIdle.classList.remove('hidden');
-    dzOver.classList.add('hidden');
-    dropZone.classList.remove('drag-over');
-  });
+dropZone.addEventListener("dragleave", e => {
+  if (dropZone.contains(e.relatedTarget)) return;
+  dropZone.classList.remove("drag-over");
+  dzIdle.classList.remove("hidden");
+  dzOver.classList.add("hidden");
 });
-
-dropZone.addEventListener('drop', e => {
+dropZone.addEventListener("drop", e => {
   e.preventDefault();
-  dzIdle.classList.remove('hidden');
-  dzOver.classList.add('hidden');
-  dropZone.classList.remove('drag-over');
-
-  const file = e.dataTransfer.files[0];
-  if (file) handleFile(file);
+  dropZone.classList.remove("drag-over");
+  dzIdle.classList.remove("hidden");
+  dzOver.classList.add("hidden");
+  const f = e.dataTransfer.files?.[0];
+  if (!f) return;
+  if (!f.type.startsWith("image/")) { showError("Only image files are supported."); return; }
+  go(f);
 });
 
-fileInput.addEventListener('change', () => {
-  const file = fileInput.files[0];
-  if (file) handleFile(file);
-  fileInput.value = '';
-});
+btnNew.addEventListener("click",   resetUI);
+errorDismiss.addEventListener("click", () => errorToast.classList.add("hidden"));
 
-btnNew.addEventListener('click', () => showView(viewUpload));
 
-// ── File Handling & Upload ───────────────────────────────────────────────────
-function handleFile(file) {
-  if (!file.type.startsWith('image/')) {
-    showError('Please upload an image file (JPG, PNG, WEBP, BMP).');
-    return;
+// ── Upload & detect ─────────────────────────────────────────────────────────
+
+async function prepareImage(file) {
+  // If file is already small (<= 2MB), upload directly
+  if (file.size <= 2 * 1024 * 1024) {
+    return file;
   }
-  upload(file);
+
+  // Downscale large images (e.g. 10-30MB phone photos) to max 2560px.
+  // This reduces upload time over ngrok from 20s to < 0.3s without sacrificing detection quality.
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const MAX = 2560;
+      let { width, height } = img;
+
+      if (width <= MAX && height <= MAX && file.size <= 3 * 1024 * 1024) {
+        resolve(file);
+        return;
+      }
+
+      if (width > MAX || height > MAX) {
+        if (width > height) {
+          height = Math.round((height * MAX) / width);
+          width = MAX;
+        } else {
+          width = Math.round((width * MAX) / height);
+          height = MAX;
+        }
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+
+      canvas.toBlob(
+        (blob) => {
+          if (blob) {
+            resolve(new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), { type: "image/jpeg" }));
+          } else {
+            resolve(file);
+          }
+        },
+        "image/jpeg",
+        0.90
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(file);
+    };
+    img.src = url;
+  });
 }
 
-async function upload(file) {
-  showView(viewLoading);
-
-  const fd = new FormData();
-  fd.append('image', file);
+async function go(file) {
+  showView("loading");
+  loadingLabel.textContent = "Preparing image…";
 
   try {
-    const res = await fetch('/detect', {
-      method: 'POST',
-      body: fd,
+    const uploadFile = await prepareImage(file);
+    loadingLabel.textContent = "Detecting faces…";
+
+    const form = new FormData();
+    form.append("image", uploadFile);
+
+    const res  = await fetch("/detect", {
+      method: "POST",
+      headers: { "ngrok-skip-browser-warning": "true" },
+      body: form,
     });
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'Server error ' + res.status }));
-      throw new Error(err.error || 'Server error ' + res.status);
+    let data;
+    try {
+      data = await res.json();
+    } catch (_) {
+      throw new Error(`Server returned HTTP ${res.status}`);
     }
 
-    const data = await res.json();
-    renderResults(data);
-    showView(viewResults);
+    if (!res.ok || data.error) { showError(data.error || `Server error (${res.status})`); return; }
 
-  } catch (err) {
-    showView(viewUpload);
-    showError(err.message || 'Detection failed. Check server connection.');
+    render(data);
+  } catch (e) {
+    showError(e.name === "TypeError"
+      ? "Cannot reach server. Is the server and ngrok tunnel running?"
+      : "Error: " + e.message);
   }
 }
 
-// ── Render Results ────────────────────────────────────────────────────────────
-function renderResults(data) {
+
+// ── Render results ──────────────────────────────────────────────────────────
+
+function render(data) {
   const n = data.face_count;
-  const t = Math.round(data.processing_ms);
 
-  resCount.textContent = `${n} face${n === 1 ? '' : 's'} detected`;
-  resTime.textContent  = `in ${t} ms`;
-  sidebarCount.textContent = `(${n})`;
+  resCount.textContent     = `${n} face${n !== 1 ? "s" : ""} detected`;
+  resTime.textContent      = `⏱ ${data.processing_ms} ms`;
+  sidebarCount.textContent = n;
+  resultImg.src            = data.annotated_image;
 
-  resultImg.src = data.annotated_image;
+  faceList.innerHTML = "";
 
-  faceList.innerHTML = '';
-
-  if (n === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'face-empty';
-    empty.textContent = 'No faces detected';
-    faceList.appendChild(empty);
-    return;
+  if (!n) {
+    faceList.innerHTML = `<p style="color:var(--text-3);font-size:12px;padding:12px 6px">
+      No faces passed the validator.</p>`;
+  } else {
+    data.faces.forEach((face, i) => buildCard(face, i));
   }
 
-  data.faces.forEach((face, idx) => {
-    const card = document.createElement('div');
-    card.className = 'face-card';
+  showView("results");
+}
 
-    const thumb = document.createElement('img');
-    thumb.className = 'face-thumb';
-    thumb.src = face.crop;
-    thumb.alt = `Face #${idx + 1}`;
+function buildCard(face, idx) {
+  const pct = (face.confidence * 100).toFixed(1);
+  const [x1, y1, x2, y2] = face.bbox;
+  const w = x2 - x1, h = y2 - y1;
 
-    const info = document.createElement('div');
-    info.className = 'face-info';
+  const card = document.createElement("div");
+  card.className = "face-card";
 
-    const num = document.createElement('span');
-    num.className = 'face-num';
-    num.textContent = `#${idx + 1}`;
+  // Thumbnail
+  const thumb = document.createElement("img");
+  thumb.className = "face-thumb";
+  thumb.src = face.crop;
+  thumb.alt = `Face ${idx + 1}`;
 
-    const score = document.createElement('span');
-    score.className = 'face-score';
-    const c = Math.round((face.confidence ?? 1) * 100);
-    score.textContent = `${c}%`;
+  // Info
+  const info = document.createElement("div");
+  info.className = "face-info";
+  info.innerHTML = `
+    <span class="face-label">Face ${idx + 1}</span>
+    <div class="conf-row">
+      <div class="conf-track"><div class="conf-fill" style="width:${pct}%"></div></div>
+      <span class="conf-pct">${pct}%</span>
+    </div>
+  `;
 
-    info.appendChild(num);
-    info.appendChild(score);
-    card.appendChild(thumb);
-    card.appendChild(info);
-    faceList.appendChild(card);
+  // Download button
+  const dl = document.createElement("button");
+  dl.className   = "dl-btn";
+  dl.title       = `Download Face ${idx + 1}`;
+  dl.textContent = "↓";
+  dl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    downloadCrop(face.crop, idx + 1, pct);
   });
+
+  card.appendChild(thumb);
+  card.appendChild(info);
+  card.appendChild(dl);
+  faceList.appendChild(card);
+}
+
+function downloadCrop(dataUri, num, pct) {
+  const a    = document.createElement("a");
+  a.href     = dataUri;
+  a.download = `face_${String(num).padStart(3, "0")}_${pct}pct.jpg`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+
+// ── View helpers ─────────────────────────────────────────────────────────────
+
+function showView(name) {
+  viewUpload.classList.add("hidden");
+  viewLoading.classList.add("hidden");
+  viewResults.classList.add("hidden");
+  if (name === "upload")  viewUpload.classList.remove("hidden");
+  if (name === "loading") viewLoading.classList.remove("hidden");
+  if (name === "results") viewResults.classList.remove("hidden");
+}
+
+function showError(msg) {
+  errorText.textContent = msg;
+  errorToast.classList.remove("hidden");
+  showView("upload");
+}
+
+function resetUI() {
+  fileInput.value  = "";
+  faceList.innerHTML = "";
+  resultImg.src    = "";
+  errorToast.classList.add("hidden");
+  showView("upload");
 }
