@@ -44,7 +44,12 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
   margin-bottom: 4px;
 }
 
-.app-icon { font-size: 22px; color: var(--accent); }
+.app-icon {
+  width: 28px;
+  height: 28px;
+  display: block;
+  flex-shrink: 0;
+}
 
 .app-title {
   font-size: 1.6rem;
