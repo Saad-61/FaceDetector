@@ -35,9 +35,38 @@ _CROP_PADDING = 0.20
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, ngrok-skip-browser-warning"
+    return response
+
+
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+
+@app.route("/favicon.ico")
+def favicon_ico():
+    resp = send_from_directory("static", "favicon.ico", mimetype="image/x-icon")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.route("/favicon.svg")
+def favicon_svg():
+    resp = send_from_directory("static", "favicon.svg", mimetype="image/svg+xml")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+@app.route("/favicon.png")
+def favicon_png():
+    resp = send_from_directory("static", "favicon.png", mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @app.route("/health")
@@ -45,8 +74,11 @@ def health():
     return jsonify({"status": "ok"})
 
 
-@app.route("/detect", methods=["POST"])
+@app.route("/detect", methods=["POST", "OPTIONS"])
 def detect():
+    if request.method == "OPTIONS":
+        return "", 204
+
     if "image" not in request.files:
         return jsonify({"error": "No image file provided. Use key 'image'."}), 400
 

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Background -->
+  <rect width="64" height="64" rx="14" fill="#0f111a"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" stroke="#323750" stroke-width="1"/>
+  
+  <!-- Detection Frame Corners (Indigo glow) -->
+  <path d="M12 22 V 15 A 3 3 0 0 1 15 12 H 22" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M42 12 H 49 A 3 3 0 0 1 52 15 V 22" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M12 42 V 49 A 3 3 0 0 0 15 52 H 22" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M42 52 H 49 A 3 3 0 0 0 52 49 V 42" stroke="#6366f1" stroke-width="3.5" stroke-linecap="round"/>
+  
+  <!-- Face Outline & Features -->
+  <ellipse cx="32" cy="32" rx="11" ry="13" stroke="#a5b4fc" stroke-width="2.2" stroke-linecap="round"/>
+  
+  <!-- Eyes -->
+  <circle cx="27.5" cy="29" r="1.8" fill="#38bdf8"/>
+  <circle cx="36.5" cy="29" r="1.8" fill="#38bdf8"/>
+  
+  <!-- Smile -->
+  <path d="M28 36 Q 32 40 36 36" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" fill="none"/>
+</svg>
